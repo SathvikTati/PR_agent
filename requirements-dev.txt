@@ -1,0 +1,4 @@
+# The function itself needs nothing beyond the Lambda runtime's own boto3.
+# These are only for running the tests locally.
+boto3>=1.34
+pytest>=8.0

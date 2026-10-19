@@ -1,0 +1,208 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Centralised GitHub pull-request notifier. One organisation-level webhook
+  reaches an HTTP API, a Python 3.12 Lambda validates and enriches the event,
+  and Power Automate posts the Teams message with real @mentions.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: pr-notifier
+    Description: Name prefix for every resource created by this stack.
+  ConfigKey:
+    Type: String
+    Default: config/repos.json
+    Description: S3 key of the repository-to-reviewer configuration.
+  ConfigCacheTtlSeconds:
+    Type: Number
+    Default: 300
+    MinValue: 0
+    Description: >
+      How long a warm container reuses the cached configuration. This is the
+      documented refresh interval: an edit in S3 takes effect within this many
+      seconds without redeploying.
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 256
+    Runtime: python3.12
+    Architectures: [arm64]
+
+Resources:
+  # ---------------------------------------------------------------------
+  # Configuration store: private, encrypted, versioned, TLS-only.
+  # ---------------------------------------------------------------------
+  ConfigBucket:
+    Type: AWS::S3::Bucket
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub "${ProjectName}-config-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+
+  ConfigBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ConfigBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt ConfigBucket.Arn
+              - !Sub "${ConfigBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  # ---------------------------------------------------------------------
+  # Secrets. Both are generated with placeholder values so that no secret
+  # material ever lives in this template or in source control. Replace the
+  # Power Automate URL (and copy the webhook secret into GitHub) after the
+  # first deploy -- see scripts/set-secrets.sh.
+  # ---------------------------------------------------------------------
+  GitHubWebhookSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${ProjectName}/github-webhook-secret"
+      Description: HMAC signing secret shared with the GitHub organisation webhook.
+      GenerateSecretString:
+        PasswordLength: 40
+        ExcludePunctuation: true
+        RequireEachIncludedType: false
+
+  PowerAutomateUrlSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${ProjectName}/power-automate-url"
+      Description: >
+        HTTP POST trigger URL of the Power Automate flow. Placeholder on
+        creation; set the real URL with scripts/set-secrets.sh.
+      GenerateSecretString:
+        PasswordLength: 32
+        ExcludePunctuation: true
+
+  # ---------------------------------------------------------------------
+  # API Gateway HTTP API: the single stable endpoint GitHub posts to.
+  # ---------------------------------------------------------------------
+  WebhookApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: "$default"
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 50
+        ThrottlingRateLimit: 25
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: >-
+          {"requestId":"$context.requestId","ip":"$context.identity.sourceIp","method":"$context.httpMethod","path":"$context.path","status":"$context.status","latency":"$context.responseLatency"}
+
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/apigateway/${ProjectName}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  NotifierFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-webhook"
+      CodeUri: .
+      Handler: lambda_function.lambda_handler
+      Description: Validates GitHub PR webhooks and forwards them to Power Automate.
+      Environment:
+        Variables:
+          CONFIG_BUCKET: !Ref ConfigBucket
+          CONFIG_KEY: !Ref ConfigKey
+          CONFIG_CACHE_TTL_SECONDS: !Ref ConfigCacheTtlSeconds
+          GITHUB_WEBHOOK_SECRET_ID: !Ref GitHubWebhookSecret
+          POWER_AUTOMATE_URL_SECRET_ID: !Ref PowerAutomateUrlSecret
+          LOG_LEVEL: !Ref LogLevel
+      Policies:
+        - Statement:
+            - Sid: ReadRepositoryConfig
+              Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub "${ConfigBucket.Arn}/${ConfigKey}"
+            - Sid: ReadSecrets
+              Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource:
+                - !Ref GitHubWebhookSecret
+                - !Ref PowerAutomateUrlSecret
+      Events:
+        Webhook:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WebhookApi
+            Path: /webhook
+            Method: POST
+            PayloadFormatVersion: "2.0"
+
+  FunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-webhook"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # A failing webhook is invisible until someone looks, so alarm on errors.
+  FunctionErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-function-errors"
+      AlarmDescription: The PR notifier Lambda is throwing errors.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref NotifierFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  WebhookUrl:
+    Description: Payload URL to configure on the GitHub organisation webhook.
+    Value: !Sub "https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/webhook"
+  ConfigBucketName:
+    Description: Bucket holding config/repos.json.
+    Value: !Ref ConfigBucket
+  ConfigObjectUri:
+    Value: !Sub "s3://${ConfigBucket}/${ConfigKey}"
+  GitHubWebhookSecretArn:
+    Description: Read this secret to get the value to paste into GitHub.
+    Value: !Ref GitHubWebhookSecret
+  PowerAutomateUrlSecretArn:
+    Description: Overwrite this secret with the real Power Automate trigger URL.
+    Value: !Ref PowerAutomateUrlSecret
+  FunctionName:
+    Value: !Ref NotifierFunction

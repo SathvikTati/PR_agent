@@ -1,0 +1,15 @@
+{
+  "delivery_id": "4f2a9c10-7b3d-11ef-9c21-3f1a2b4c5d6e",
+  "repository": "CalfusApps/onboarding-services",
+  "action": "opened",
+  "number": 123,
+  "title": "Add SSO authentication",
+  "author": "sathvik",
+  "source_branch": "feature/sso",
+  "target_branch": "develop",
+  "description": "Adds SSO authentication.",
+  "url": "https://github.com/CalfusApps/onboarding-services/pull/123",
+  "reviewers": [
+    { "github": "sathvik", "teams_email": "sathvik.tati@calfus.com" }
+  ]
+}

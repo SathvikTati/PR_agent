@@ -1,0 +1,13 @@
+{
+  "CalfusApps/onboarding-services": {
+    "reviewers": [
+      { "github": "sathvik", "teams_email": "sathvik.tati@calfus.com" }
+    ]
+  },
+  "mvue-ai/mvue-ai-connectors": {
+    "reviewers": [
+      { "github": "reviewer2", "teams_email": "reviewer2@calfus.com" },
+      { "github": "reviewer3", "teams_email": "reviewer3@calfus.com" }
+    ]
+  }
+}

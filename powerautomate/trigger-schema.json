@@ -1,0 +1,27 @@
+{
+  "type": "object",
+  "properties": {
+    "delivery_id": { "type": "string" },
+    "repository": { "type": "string" },
+    "action": { "type": "string" },
+    "number": { "type": "integer" },
+    "title": { "type": "string" },
+    "author": { "type": "string" },
+    "source_branch": { "type": "string" },
+    "target_branch": { "type": "string" },
+    "description": { "type": "string" },
+    "url": { "type": "string" },
+    "reviewers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "github": { "type": "string" },
+          "teams_email": { "type": "string" }
+        },
+        "required": ["github", "teams_email"]
+      }
+    }
+  },
+  "required": ["delivery_id", "repository", "action", "number", "title", "url", "reviewers"]
+}
